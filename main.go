@@ -26,6 +26,7 @@ func main() {
 	printAndQuitOnError(err)
 	defer file.Close()
 
+	workDir, err := os.Getwd()
 	outDir, err := os.MkdirTemp(".", "export_")
 	printAndQuitOnError(err)
 
@@ -39,15 +40,19 @@ func main() {
 	}
 	matches := removeDuplicateStr(rawMatches)
 
+	downloadResults := make(map[string]DownloadResult)
 	for i, match := range matches {
 		fmt.Printf("Downloading file %d of %d: %s\n", i+1, len(matches), match)
-		downloadAndWriteFile(match, outDir)
+		downloadResults[match] = downloadAndWriteFile(match, outDir)
 	}
 
-	fmt.Printf("Data saved in %s\n\n", outDir)
+	fmt.Printf("Data saved in %s\n", outDir)
+	os.WriteFile(filepath.Join(workDir, "downloadReport.csv"), []byte(writeCsvReport(downloadResults)), 0664)
+	fmt.Printf("A report of the downloads was written in %s\n\n", filepath.Join(workDir))
+
 }
 
-func downloadAndWriteFile(url, outDir string) {
+func downloadAndWriteFile(url, outDir string) DownloadResult {
 	client := &http.Client{}
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -55,15 +60,20 @@ func downloadAndWriteFile(url, outDir string) {
 	req.Header.Add("Referer", url)
 
 	resp, err := client.Do(req)
-	printAndQuitOnError(err)
+	if err != nil {
+		return DownloadResult{url, "", "Error in processing the HTTP request " + err.Error()}
+	}
 
 	if resp.StatusCode != 200 {
-		fmt.Println("Download failed HTTP status " + resp.Status)
-		return
+		errorMsg := "Download failed HTTP code " + resp.Status
+		fmt.Println(errorMsg)
+		return DownloadResult{url, "", errorMsg}
 	}
 	defer resp.Body.Close()
 	respBody, err := ioutil.ReadAll(resp.Body)
-	printAndQuitOnError(err)
+	if err != nil {
+		return DownloadResult{url, "", "Error in processing the response data " + err.Error()}
+	}
 
 	urlSplits := strings.Split(url, "/")
 	fileName := urlSplits[len(urlSplits)-1]
@@ -71,20 +81,31 @@ func downloadAndWriteFile(url, outDir string) {
 
 	if fileExtension == "webp" {
 		err = os.WriteFile(filepath.Join(outDir, fileName), respBody, 0600)
-		printAndQuitOnError(err)
+		if err != nil {
+			return DownloadResult{url, "", "Error in saving the file " + err.Error()}
+		}
+
+		return DownloadResult{url, fileName, ""}
+
 	} else {
 		format, err := imgconv.FormatFromExtension(fileExtension)
-		printAndQuitOnError(err)
+		if err != nil {
+			return DownloadResult{url, "", "Error in detecting image extension from name"}
+		}
 
 		buf := new(bytes.Buffer)
 		img, err := imgconv.Decode(bytes.NewReader(respBody))
 		err = imgconv.Write(buf, img, imgconv.FormatOption{Format: format})
 		if err != nil {
-			printAndQuitOnError(err)
+			return DownloadResult{url, "", "Error in converting the image"}
 		}
-		printAndQuitOnError(err)
 		err = os.WriteFile(filepath.Join(outDir, fileName), buf.Bytes(), 0600)
-		printAndQuitOnError(err)
+		if err != nil {
+			return DownloadResult{url, "", "Error in writing the output file"}
+		}
+
+		return DownloadResult{url, fileName, ""}
+
 	}
 }
 
@@ -105,4 +126,20 @@ func printAndQuitOnError(err error) {
 		fmt.Printf("error: %s", err.Error())
 		os.Exit(1)
 	}
+}
+
+func writeCsvReport(downloadResults map[string]DownloadResult) string {
+
+	var sb strings.Builder
+
+	sb.WriteString("url,outputFileName,error\n")
+	for _, downloadResult := range downloadResults {
+		sb.WriteString(downloadResult.url + "," + downloadResult.outputFileName + "," + downloadResult.error + "\n")
+	}
+
+	return sb.String()
+}
+
+type DownloadResult struct {
+	url, outputFileName, error string
 }
